@@ -5,12 +5,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/pkg/errors"
 )
+
+var patternConversionRegexps = []*regexp.Regexp{
+	regexp.MustCompile(`\{\{[^}]+\}\}`),
+	regexp.MustCompile(`\*+`),
+}
 
 type RotateType uint8
 
@@ -19,6 +26,12 @@ const (
 	RotateTypeSize
 	RotateTypeBoth
 )
+
+type unlinkFileInfo struct {
+	Path     string
+	ModTime  time.Time
+	ToUnlink bool
+}
 
 type FileRotator struct {
 	mu    sync.RWMutex
@@ -32,15 +45,21 @@ type FileRotator struct {
 	maxAge    time.Duration
 	maxBackup uint
 
-	generation uint
-	linkName   string
-	suffix     string
-	patternFn  string
-	baseFn     string
-	fn         string
+	generation  uint
+	globPattern string
+	linkName    string
+	suffix      string
+	patternFn   string
+	baseFn      string
+	fn          string
 }
 
 func New(filename string, opts ...Option) (*FileRotator, error) {
+	gp := filename
+	for _, re := range patternConversionRegexps {
+		gp = re.ReplaceAllString(gp, "*")
+	}
+
 	rotator := &FileRotator{
 		mu:    sync.RWMutex{},
 		outFh: nil,
@@ -53,12 +72,13 @@ func New(filename string, opts ...Option) (*FileRotator, error) {
 		maxAge:    7 * 24 * time.Hour, // 7 days
 		maxBackup: 30,
 
-		generation: 0,
-		linkName:   "",
-		suffix:     "",
-		patternFn:  filename,
-		baseFn:     "",
-		fn:         "",
+		generation:  0,
+		globPattern: gp,
+		linkName:    "",
+		suffix:      "",
+		patternFn:   filename,
+		baseFn:      "",
+		fn:          "",
 	}
 
 	for _, opt := range opts {
@@ -154,12 +174,10 @@ func (rotator *FileRotator) Rotate(filename string) error {
 		return err
 	}
 
-	var guard cleanupGuard
-	guard.fn = func() {
+	defer func() {
 		fh.Close()
 		os.Remove(lockfn)
-	}
-	defer guard.Run()
+	}()
 
 	if rotator.linkName != "" {
 		tempLinkName := filename + `.symlink`
@@ -192,6 +210,84 @@ func (rotator *FileRotator) Rotate(filename string) error {
 			return errors.Wrap(err, "failed to rename new symlink")
 		}
 	}
+
+	matches, err := filepath.Glob(rotator.globPattern)
+	if err != nil {
+		return err
+	}
+
+	toUnlinks := make([]string, 0, len(matches))
+	toUnlinkMap := make(map[string]unlinkFileInfo, len(matches))
+
+	realMatches := make([]string, 0, len(matches))
+	cutoff := rotator.clock.Now().Add(-1 * rotator.maxAge)
+	for _, path := range matches {
+		if strings.HasSuffix(path, ".lock") || strings.HasSuffix(path, ".symlink") {
+			continue // skip lock and symlink files
+		}
+
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+
+		fl, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+
+		if fl.Mode()&os.ModeSymlink == os.ModeSymlink {
+			continue
+		}
+
+		temp := unlinkFileInfo{
+			Path:     path,
+			ModTime:  fi.ModTime(),
+			ToUnlink: false,
+		}
+
+		if rotator.maxAge > 0 && fi.ModTime().Before(cutoff) {
+			temp.ToUnlink = true
+			toUnlinks = append(toUnlinks, path)
+		}
+
+		realMatches = append(realMatches, path)
+		toUnlinkMap[path] = temp
+	}
+
+	remainingCount := len(realMatches) - len(toUnlinks)
+	if rotator.maxBackup > 0 && remainingCount > int(rotator.maxBackup) {
+		sort.Slice(realMatches, func(i, j int) bool {
+			// sort by modification time, oldest first
+			return toUnlinkMap[realMatches[i]].ModTime.Before(toUnlinkMap[realMatches[j]].ModTime)
+		})
+
+		for _, path := range realMatches {
+			if remainingCount <= int(rotator.maxBackup) {
+				break
+			}
+
+			temp := toUnlinkMap[path]
+			if temp.ToUnlink {
+				continue // already marked for unlinking
+			}
+
+			toUnlinks = append(toUnlinks, path)
+			temp.ToUnlink = true
+			toUnlinkMap[path] = temp
+			remainingCount--
+		}
+	}
+
+	if len(toUnlinks) <= 0 {
+		return nil
+	}
+
+	go func() {
+		for _, path := range toUnlinks {
+			os.Remove(path)
+		}
+	}()
 
 	return nil
 }
