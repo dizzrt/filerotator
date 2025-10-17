@@ -50,3 +50,36 @@ func CreateFile(filename string) (*os.File, error) {
 
 	return fh, nil
 }
+
+func parsePath(s string) (dir, name, suffix string) {
+	filename := filepath.Base(s)
+	dir = filepath.Dir(s)
+
+	if dir == "." && filepath.Base(s) == s {
+		dir = ""
+	}
+
+	lastDot := strings.LastIndex(filename, ".")
+	if lastDot <= 0 {
+		name = filename
+		suffix = ""
+	} else {
+		name = filename[:lastDot]
+		suffix = filename[lastDot:]
+	}
+
+	return dir, name, suffix
+}
+
+func ParseRotationType(s string) RotateType {
+	switch strings.ToLower(s) {
+	case "time":
+		return RotateTypeTime
+	case "size":
+		return RotateTypeSize
+	case "both":
+		return RotateTypeBoth
+	default:
+		return RotateTypeTime
+	}
+}

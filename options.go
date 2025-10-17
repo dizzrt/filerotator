@@ -40,14 +40,8 @@ func WithMaxBackup(maxBackup uint) Option {
 	}
 }
 
-func WithLinkName(linkName string) Option {
+func WithSymlink(symlink string) Option {
 	return func(rotator *FileRotator) {
-		rotator.linkName = linkName
-	}
-}
-
-func WithSuffix(suffix string) Option {
-	return func(rotator *FileRotator) {
-		rotator.suffix = suffix
+		rotator.symlink = symlink
 	}
 }

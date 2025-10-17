@@ -1,12 +1,12 @@
 package filerotator
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,20 +45,24 @@ type FileRotator struct {
 	maxAge    time.Duration
 	maxBackup uint
 
-	generation  uint
-	globPattern string
-	linkName    string
-	suffix      string
-	patternFn   string
-	baseFn      string
-	fn          string
+	fnPattern     string
+	fnGlobPattern string
+	fnGeneration  uint
+
+	suffix  string
+	baseFn  string
+	fn      string
+	symlink string
 }
 
-func New(filename string, opts ...Option) (*FileRotator, error) {
-	gp := filename
+func New(logFilePath string, opts ...Option) (*FileRotator, error) {
+	gp := logFilePath
 	for _, re := range patternConversionRegexps {
 		gp = re.ReplaceAllString(gp, "*")
 	}
+
+	dir, name, suffix := parsePath(logFilePath)
+	pattern := filepath.Join(dir, name)
 
 	rotator := &FileRotator{
 		mu:    sync.RWMutex{},
@@ -72,13 +76,14 @@ func New(filename string, opts ...Option) (*FileRotator, error) {
 		maxAge:    7 * 24 * time.Hour, // 7 days
 		maxBackup: 30,
 
-		generation:  0,
-		globPattern: gp,
-		linkName:    "",
-		suffix:      "",
-		patternFn:   filename,
-		baseFn:      "",
-		fn:          "",
+		fnPattern:     pattern,
+		fnGlobPattern: gp,
+		fnGeneration:  0,
+
+		suffix:  suffix,
+		baseFn:  "",
+		fn:      "",
+		symlink: "",
 	}
 
 	for _, opt := range opts {
@@ -102,44 +107,40 @@ func (rotator *FileRotator) Write(p []byte) (n int, err error) {
 
 func (rotator *FileRotator) getWriter() (io.Writer, error) {
 	rt := rotator.rotateType
-	newBaseFn := rotator.patternFn
+	newBaseFn := rotator.fnPattern
 
 	if rt == RotateTypeTime || rt == RotateTypeBoth {
-		newBaseFn = generateTimeFn(rotator.patternFn, rotator.rotationTime, rotator.clock)
+		newBaseFn = generateTimeFn(rotator.fnPattern, rotator.rotationTime, rotator.clock)
 		if rotator.baseFn != newBaseFn {
-			rotator.generation = 0
+			rotator.fnGeneration = 0
 		}
 	}
 
 	var newFn string
 	for {
-		if rotator.suffix == "" {
-			if rotator.generation == 0 {
-				newFn = newBaseFn
-			} else {
-				newFn = fmt.Sprintf("%s.%d", newBaseFn, rotator.generation)
-			}
-		} else {
-			if rotator.generation == 0 {
-				newFn = fmt.Sprintf("%s.%s", newBaseFn, rotator.suffix)
-			} else {
-				newFn = fmt.Sprintf("%s.%d.%s", newBaseFn, rotator.generation, rotator.suffix)
-			}
+		newFn = newBaseFn
+		if rotator.fnGeneration > 0 {
+			newFn += "." + strconv.FormatUint(uint64(rotator.fnGeneration), 10)
+		}
+
+		if rotator.suffix != "" {
+			newFn += rotator.suffix
 		}
 
 		if fi, err := os.Stat(newFn); err != nil {
 			if os.IsNotExist(err) {
 				break // file does not exist, we can create it
-			} else {
-				return nil, errors.Wrapf(err, "failed to check existence of file %v", newFn)
 			}
+
+			return nil, errors.Wrapf(err, "failed to check existence of file %v", newFn)
 		} else {
 			// file exists, check if we need to rotate by size
 			if (rt == RotateTypeSize || rt == RotateTypeBoth) && fi.Size() >= rotator.rotationSize && newBaseFn == rotator.baseFn {
-				rotator.generation++
-			} else {
-				break
+				rotator.fnGeneration++
+				continue
 			}
+
+			break
 		}
 	}
 
@@ -179,19 +180,14 @@ func (rotator *FileRotator) Rotate(filename string) error {
 		os.Remove(lockfn)
 	}()
 
-	if rotator.linkName != "" {
+	if rotator.symlink != "" {
 		tempLinkName := filename + `.symlink`
 
 		linkDest := filename
-		linkDir := filepath.Dir(rotator.linkName)
+		linkDir := filepath.Dir(rotator.symlink)
 
-		baseDir := filepath.Dir(filename)
-		if strings.Contains(rotator.linkName, baseDir) {
-			temp, err := filepath.Rel(linkDir, filename)
-			if err != nil {
-				return errors.Wrapf(err, "failed to evaluate relative path from %#v to %#v", baseDir, rotator.linkName)
-			}
-
+		temp, err := filepath.Rel(linkDir, filename)
+		if err == nil {
 			linkDest = temp
 		}
 
@@ -199,19 +195,18 @@ func (rotator *FileRotator) Rotate(filename string) error {
 			return errors.Wrap(err, "failed to create new symlink")
 		}
 
-		_, err := os.Stat(linkDir)
-		if err != nil {
+		if _, err := os.Stat(linkDir); err != nil {
 			if err := os.MkdirAll(linkDir, 0755); err != nil {
 				return errors.Wrapf(err, "failed to create directory %s", linkDir)
 			}
 		}
 
-		if err := os.Rename(tempLinkName, rotator.linkName); err != nil {
+		if err := os.Rename(tempLinkName, rotator.symlink); err != nil {
 			return errors.Wrap(err, "failed to rename new symlink")
 		}
 	}
 
-	matches, err := filepath.Glob(rotator.globPattern)
+	matches, err := filepath.Glob(rotator.fnGlobPattern)
 	if err != nil {
 		return err
 	}

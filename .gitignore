@@ -26,3 +26,6 @@ go.work.sum
 
 # Apple Desktop services store
 .DS_Store
+
+log/
+logs/

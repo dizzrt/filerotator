@@ -9,10 +9,9 @@ import (
 )
 
 func TestFileRotator(t *testing.T) {
-	rotator, err := filerotator.New("./logs/{{YYYY}}{{MM}}{{DD}}{{hh}}",
-		filerotator.WithLinkName("./logs/stock.log"),
+	rotator, err := filerotator.New("./log/logs/{{YYYY}}{{MM}}{{DD}}{{hh}}",
+		filerotator.WithSymlink("./log/a/b/c/service.cc"),
 		filerotator.WithRotationTime(time.Hour),
-		filerotator.WithSuffix("log"),
 		filerotator.WithRotationSize(1024*1024),
 	)
 
