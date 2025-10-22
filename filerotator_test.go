@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dizzrt/filerotator"
+	"github.com/dizzrt/filerotator"
 )
 
 func TestFileRotator(t *testing.T) {

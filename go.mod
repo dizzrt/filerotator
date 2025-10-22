@@ -1,4 +1,4 @@
-module github.com/Dizzrt/filerotator
+module github.com/dizzrt/filerotator
 
 go 1.24.4
 
